@@ -1,0 +1,191 @@
+name: deploy
+
+# Everything learned the hard way on the sibling project is already here:
+#  - the build target is named, never inherited from stage order
+#  - a public function URL needs BOTH lambda:InvokeFunctionUrl and
+#    lambda:InvokeFunction, which Lambda states in the body of its own 403
+#  - the token's claims are printed, because GitHub now sends a subject with
+#    numeric ids that the AWS console wizard does not write
+#  - a failed reply is kept, not discarded: curl -f throws away the one thing
+#    worth reading
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  FUNCTION: protein-solubility
+  ECR_REPO: protein-solubility
+  ROLE: arn:aws:iam::031391485774:role/protein-solubility-deploy
+
+jobs:
+  deploy:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: what identity is GitHub actually presenting
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin)["value"])')
+          python3 - "$TOKEN" <<'PY'
+          import base64, json, sys
+          p = sys.argv[1].split(".")[1]
+          p += "=" * (-len(p) % 4)
+          c = json.loads(base64.urlsafe_b64decode(p))
+          print("--- the subject the trust policy has to match ---")
+          print(repr(c["sub"]))
+          print("aud:", repr(c["aud"]))
+          PY
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: deploy-${{ github.run_id }}
+
+      - run: aws sts get-caller-identity
+
+      - name: ensure the image repository exists
+        run: |
+          aws ecr describe-repositories --repository-names "$ECR_REPO" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "$ECR_REPO" \
+                 --image-scanning-configuration scanOnPush=true >/dev/null
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: build and push the Lambda image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: lambda          # named, not inherited
+          push: true
+          provenance: false
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+
+      - name: create or update the function
+        id: fn
+        run: |
+          set -euo pipefail
+          IMAGE=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+          if aws lambda get-function --function-name "$FUNCTION" >/dev/null 2>&1; then
+            echo "updating existing function"
+            aws lambda update-function-code --function-name "$FUNCTION" \
+              --image-uri "$IMAGE" >/dev/null
+          else
+            echo "creating the function"
+            aws lambda create-function --function-name "$FUNCTION" \
+              --package-type Image --code ImageUri="$IMAGE" \
+              --role arn:aws:iam::031391485774:role/protein-solubility-lambda-exec \
+              --timeout 30 --memory-size 2048 \
+              --description "Protein solubility, fine-tuned ESM-2 35M on ONNX Runtime" >/dev/null
+          fi
+          aws lambda wait function-updated --function-name "$FUNCTION"
+
+      - name: a public URL needs both invoke permissions
+        id: url
+        run: |
+          set -euo pipefail
+          if aws lambda get-function-url-config --function-name "$FUNCTION" >/dev/null 2>&1; then
+            aws lambda update-function-url-config --function-name "$FUNCTION" \
+              --auth-type NONE >/dev/null
+          else
+            aws lambda create-function-url-config --function-name "$FUNCTION" \
+              --auth-type NONE >/dev/null
+          fi
+          # Lambda says the rule in the body of its own 403: a function URL
+          # needs lambda:InvokeFunctionUrl AND lambda:InvokeFunction. Nearly
+          # every guide shows only the first, and the policy then looks
+          # textbook and refuses every request.
+          for A in InvokeFunctionUrl InvokeFunction; do
+            # The condition is accepted on InvokeFunctionUrl only.
+            EXTRA=""
+            [ "$A" = "InvokeFunctionUrl" ] && EXTRA="--function-url-auth-type NONE"
+            if ERR=$(aws lambda add-permission --function-name "$FUNCTION" \
+                       --statement-id "public-url-$A" --action "lambda:$A" \
+                       --principal '*' $EXTRA 2>&1 >/dev/null); then
+              echo "granted lambda:$A"
+            elif printf '%s' "$ERR" | grep -q ResourceConflictException; then
+              echo "lambda:$A already granted"
+            else
+              echo "$ERR"; exit 1
+            fi
+          done
+          AUTH=$(aws lambda get-function-url-config --function-name "$FUNCTION" \
+                   --query AuthType --output text)
+          test "$AUTH" = "NONE"
+          URL=$(aws lambda get-function-url-config --function-name "$FUNCTION" \
+                  --query FunctionUrl --output text)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "$URL"
+
+      - name: watch it, so a broken deploy is noticed without being watched
+        run: |
+          set -euo pipefail
+          aws cloudwatch put-metric-alarm \
+            --alarm-name "${FUNCTION}-errors" \
+            --alarm-description "Any error from ${FUNCTION} in a 5 minute window" \
+            --namespace AWS/Lambda --metric-name Errors --statistic Sum \
+            --dimensions Name=FunctionName,Value="$FUNCTION" \
+            --period 300 --evaluation-periods 1 --threshold 1 \
+            --comparison-operator GreaterThanOrEqualToThreshold \
+            --treat-missing-data notBreaching
+          echo "alarm ${FUNCTION}-errors is in place"
+
+      - name: prove the deployed function answers, and answers sensibly
+        run: |
+          set -euo pipefail
+          URL="${{ steps.url.outputs.url }}"
+          for i in $(seq 1 30); do
+            CODE=$(curl -sS -o health.json -D headers.txt -w '%{http_code}' "${URL}health" || echo 000)
+            [ "$CODE" = "200" ] && break
+            echo "attempt $i: HTTP $CODE"; sleep 5
+          done
+          if [ "$CODE" != "200" ]; then
+            echo "--- headers ---"; cat headers.txt
+            echo "--- body ---"; cat health.json; echo
+            exit 1
+          fi
+          cat health.json; echo
+          python3 - "$URL" <<'PY'
+          import json, sys, urllib.request
+          url = sys.argv[1]
+          h = json.load(urllib.request.urlopen(url + "health", timeout=30))
+          assert h["status"] == "ok", h
+          # The guard has to be live out here, not only in the test suite.
+          assert h["vocabulary_checked_against_model"] is True, h
+
+          req = urllib.request.Request(
+              url + "predict",
+              data=json.dumps({"sequences": ["MKTVRQERLKSIVRILERSKEPVSGAQ", "MKTV"]}).encode(),
+              headers={"content-type": "application/json"})
+          body = json.load(urllib.request.urlopen(req, timeout=60))
+          rs = body["results"]
+          assert len(rs) == 2, rs
+          assert all(0.0 <= r["probability_soluble"] <= 1.0 for r in rs), rs
+          # The limits travel with the answer or the number invites too much trust.
+          assert body["performance"]["mcc"] == 0.4754, body
+          assert "not advice" in body["caveat"], body
+          print(f"live: {rs[0]['call']} {rs[0]['probability_soluble']}, "
+                f"{rs[1]['call']} {rs[1]['probability_soluble']}")
+          PY
+
+      - name: summary
+        run: |
+          echo "### Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.url.outputs.url }}" >> $GITHUB_STEP_SUMMARY
