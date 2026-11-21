@@ -194,3 +194,57 @@ def test_a_missing_model_is_a_clear_failure_not_a_stack_trace(tmp_path):
     with pytest.raises(FileNotFoundError) as e:
         Predictor(tmp_path / "absent.onnx")
     assert "MODEL_PATH" in str(e.value)
+
+
+# --- the page itself ---------------------------------------------------
+#
+# Three defects shipped to production at once here, and no test saw any of
+# them: the HTML claimed the real model's accuracy above a random-weights
+# model, the script read a /health field that had been renamed, and the
+# crash from that rename replaced the honest caveat with "could not reach
+# the service" - while the service was answering perfectly. CI had asserted
+# the JSON and never looked at the page.
+
+def _page_parts():
+    from app.page import PAGE
+    prose = PAGE.split("</style>", 1)[1].split("<script>", 1)[0]
+    script = PAGE.split("<script>", 1)[1]
+    return prose, script
+
+
+def test_the_page_quotes_no_score_of_its_own():
+    """Prose outlives the weights it described, and then it is a lie."""
+    import re
+    prose, _ = _page_parts()
+    bad = re.findall(r"MCC|AUROC|\d+(?:\.\d+)?\s*%|times in (?:four|five|ten)|"
+                     r"accurate|accuracy", prose, re.I)
+    assert not bad, f"the HTML makes its own performance claim: {bad}"
+
+
+def test_the_page_reads_only_fields_health_actually_returns():
+    """It read h.performance for a day after /health renamed it h.model."""
+    import re
+    _, script = _page_parts()
+    body = client.get("/health").json()
+
+    used = set(re.findall(r"\bh\.([a-z_]+)", script))
+    assert used, "the script reads nothing from /health - has it changed shape?"
+    assert used <= set(body), f"page reads {sorted(used - set(body))}; /health has no such field"
+
+    used_card = set(re.findall(r"\bm\.([a-z_]+)", script))
+    assert used_card, "the script reads nothing from the model card"
+    assert used_card <= set(body["model"]), (
+        f"page reads {sorted(used_card - set(body['model']))} off the card; it has no such field")
+
+
+def test_the_page_can_say_the_model_is_hollow():
+    """The red banner existed in the CSS and nothing ever filled it."""
+    prose, script = _page_parts()
+    assert 'id="alarm"' in prose and 'id="claim"' in prose
+    assert "answers_mean_nothing" in script, "nothing on the page reacts to a stand-in"
+    assert "$(\"#alarm\").className" in script, "the alarm element is never given its style"
+
+
+def test_the_caveat_reads_as_one_sentence():
+    b = client.get("/health").json()
+    assert ".." not in b["caveat"]

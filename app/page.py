@@ -51,9 +51,9 @@ PAGE = r"""<!doctype html>
 <div class="wrap">
   <div id="alarm"></div>
   <h1>Protein solubility</h1>
-  <p class="lede">A fine-tuned ESM-2 (35M) guesses whether a protein expresses solubly in
-  <i>E.&nbsp;coli</i>. It is right about three times in four &mdash; useful for ranking a list,
-  not for deciding about one protein.</p>
+  <p class="lede">An ESM-2 (35M) model guesses whether a protein expresses solubly in
+  <i>E.&nbsp;coli</i> &mdash; useful for ranking a list, not for deciding about one protein.
+  <span id="claim">Asking the service which model is loaded&hellip;</span></p>
 
   <div class="card">
     <h2>Sequence</h2>
@@ -95,17 +95,44 @@ async function j(url, opts, retry = true) {
   return b;
 }
 
+// Every claim on this page comes from the card the weights shipped with.
+// Nothing about performance is written into the HTML: prose outlives the
+// weights it described, and then it is simply a lie.
+function claimFor(m) {
+  if (m.answers_mean_nothing) return "";          // the banner above says it louder
+  const bits = [];
+  if (m.mcc != null) bits.push("MCC " + m.mcc);
+  if (m.auroc != null) bits.push("AUROC " + m.auroc);
+  if (!bits.length) return "No measured performance shipped with these weights.";
+  return bits.join(", ") + (m.trained_on ? " on " + m.trained_on : "") + ".";
+}
+
 (async () => {
+  let h;
+  try { h = await j("/health"); }
+  catch (e) {
+    $("#caveat").textContent = "Could not reach the service: " + e.message;
+    $("#claim").textContent = "";
+    return;
+  }
+  // The caveat lands first and alone, so a later bug on this page cannot
+  // erase it. That is exactly how it was lost once.
+  $("#caveat").textContent = h.caveat || "";
   try {
-    const h = await j("/health");
-    $("#caveat").textContent = h.caveat;
-    const p = h.performance;
-    $("#perf").textContent = `${p.measured} · MCC ${p.mcc}, AUROC ${p.auroc} on ${p.trained_on}`;
+    const m = h.model || {};
     if (!h.vocabulary_checked_against_model) {
       $("#caveat").textContent += " The alphabet could not be checked against the model ("
         + h.vocabulary_check + "), so treat the numbers with extra suspicion.";
     }
-  } catch (e) { $("#caveat").textContent = "Could not reach the service: " + e.message; }
+    $("#claim").textContent = claimFor(m);
+    $("#perf").textContent = m.name ? "Loaded: " + m.name + (m.measured ? " · " + m.measured : "") : "";
+    if (m.answers_mean_nothing) {
+      $("#alarm").className = "alarm";
+      $("#alarm").textContent = "These numbers mean nothing. " + (m.what_it_is || "");
+    }
+  } catch (e) {
+    $("#claim").textContent = "Could not read the model card: " + e.message;
+  }
 })();
 
 // FASTA headers and whitespace are stripped here so a pasted record just works.

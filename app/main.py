@@ -1,9 +1,9 @@
 """Protein solubility prediction, served with its own limits attached.
 
-The model is a fine-tuned ESM-2 35M. On the DeepSol test set it reaches MCC
-0.475 - clearly better than chance, and nowhere near a decision you would act
-on for a single protein. Every answer says so, because a bare number between 0
-and 1 invites more confidence than this model has earned.
+The model is a fine-tuned ESM-2 35M. What it scored, and on what, is read from
+the card that ships beside the weights - never written into this code, and never
+into the page. A bare number between 0 and 1 invites more confidence than any of
+these models has earned, so every answer carries the card's own caveat.
 """
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ HOLLOW_CAVEAT = (
 def caveat(card: dict) -> str:
     """Never quote a score the loaded weights did not earn."""
     if card.get("answers_mean_nothing"):
-        return HOLLOW_CAVEAT.format(name=card.get("name", "placeholder"),
-                                    what=card.get("what_it_is", ""))
+        what = (card.get("what_it_is") or "").strip().rstrip(".")
+        return HOLLOW_CAVEAT.format(name=card.get("name", "placeholder"), what=what)
     return REAL_CAVEAT.format(mcc=card.get("mcc"))
 
 MAX_SEQUENCES = 64
