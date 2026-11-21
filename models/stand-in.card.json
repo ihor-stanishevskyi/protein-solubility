@@ -1,0 +1,11 @@
+{
+  "kind": "stand-in",
+  "name": "stand-in model",
+  "what_it_is": "A 1.7 KB graph with the real model's inputs and outputs and random weights. It exists so the service can be built, tested and deployed before the trained model is ready.",
+  "answers_mean_nothing": true,
+  "trained_on": null,
+  "mcc": null,
+  "auroc": null,
+  "accuracy": null,
+  "measured": null
+}

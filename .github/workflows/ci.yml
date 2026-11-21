@@ -72,6 +72,11 @@ jobs:
           # live in the image, not only in the test suite.
           assert h["vocabulary_checked_against_model"] is True, h
           assert h["alphabet_size"] == 33, h
+          # The image ships the stand-in, so it must say so rather than
+          # quoting the trained model's score.
+          assert h["model"]["kind"] == "stand-in", h
+          assert h["model"]["mcc"] is None, h
+          assert "MEAN NOTHING" in h["caveat"], h
 
           req = urllib.request.Request(
               "http://localhost:8080/predict",

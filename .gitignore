@@ -4,3 +4,4 @@ __pycache__/
 .ruff_cache/
 # The trained model is 140 MB and comes from S3 at build time, not from git.
 app/model.onnx
+app/model.card.json

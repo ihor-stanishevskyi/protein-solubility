@@ -19,29 +19,34 @@ from .page import PAGE
 
 __version__ = "0.1.0"
 
-# What the model was measured at, and where. Quoted in every answer rather than
-# living only in a README nobody opens.
-PERFORMANCE = {
-    "trained_on": "DeepSol (proteinea/solubility), 62478 train / 2001 test",
-    "mcc": 0.4754,
-    "auroc": 0.8344,
-    "accuracy": 0.7361,
-    "measured": "2026-11-07, fine-tuned ESM-2 35M, 2 epochs",
-}
-CAVEAT = (
-    "MCC 0.475 on the DeepSol test set: better than chance by a wide margin, "
+REAL_CAVEAT = (
+    "MCC {mcc} on the DeepSol test set: better than chance by a wide margin, "
     "and far from a decision you should act on for one protein. The training "
     "set is E. coli expression data, so a prediction for a protein from another "
     "organism or expression system is extrapolation. This is not a laboratory "
     "result and not advice."
 )
+HOLLOW_CAVEAT = (
+    "THESE NUMBERS MEAN NOTHING. This service is running a {name}, not a trained "
+    "model: {what}. Every probability below is arbitrary. The service is live so "
+    "that the deployment can be tested before the model exists."
+)
+
+
+def caveat(card: dict) -> str:
+    """Never quote a score the loaded weights did not earn."""
+    if card.get("answers_mean_nothing"):
+        return HOLLOW_CAVEAT.format(name=card.get("name", "placeholder"),
+                                    what=card.get("what_it_is", ""))
+    return REAL_CAVEAT.format(mcc=card.get("mcc"))
 
 MAX_SEQUENCES = 64
 MAX_RESIDUES = 64 * 512
 
 app = FastAPI(
     title="Protein solubility",
-    description="Fine-tuned ESM-2 35M, served on CPU. " + CAVEAT,
+    description="Fine-tuned ESM-2 35M, served on CPU. The measured performance "
+                "and its caveat travel with whichever weights are loaded; see /health.",
     version=__version__,
 )
 
@@ -73,8 +78,8 @@ def health():
         # whether we hope it matches.
         "vocabulary_checked_against_model": p.vocab_verified,
         "vocabulary_check": p.vocab_check,
-        "performance": PERFORMANCE,
-        "caveat": CAVEAT,
+        "model": p.card,
+        "caveat": caveat(p.card),
     }
 
 
@@ -112,7 +117,7 @@ def predict(req: PredictRequest):
             "call": "soluble" if prob > 0.5 else "insoluble",
             "unrecognised_characters": odd or None,
         })
-    return {"results": results, "performance": PERFORMANCE, "caveat": CAVEAT}
+    return {"results": results, "model": p.card, "caveat": caveat(p.card)}
 
 
 @app.get("/example", tags=["predict"])

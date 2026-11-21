@@ -43,10 +43,13 @@ PAGE = r"""<!doctype html>
   td{padding:6px 10px 6px 0;border-bottom:1px solid var(--line)}
   td:last-child{text-align:right;font-variant-numeric:tabular-nums}
   .warn{border-left:3px solid var(--bad);padding-left:12px;font-size:14px;color:var(--muted)}
+  .alarm{background:var(--bad);color:var(--bg);border-radius:10px;padding:14px 16px;
+         margin:0 0 18px;font-size:14.5px;line-height:1.5;font-weight:600}
   footer{color:var(--muted);font-size:13px;margin-top:24px}
   footer a{color:var(--accent)}
 </style>
 <div class="wrap">
+  <div id="alarm"></div>
   <h1>Protein solubility</h1>
   <p class="lede">A fine-tuned ESM-2 (35M) guesses whether a protein expresses solubly in
   <i>E.&nbsp;coli</i>. It is right about three times in four &mdash; useful for ranking a list,

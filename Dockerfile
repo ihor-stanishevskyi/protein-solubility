@@ -9,26 +9,33 @@
 # Which model gets baked in. Defaults to the stand-in so the image can be built
 # and smoke-tested before the trained weights exist; CI passes the real one.
 ARG MODEL_SOURCE=models/stand-in.onnx
+# The card states what these weights are and what they scored. It travels with
+# them so the service can never quote a number the loaded model did not earn.
+ARG MODEL_CARD=models/stand-in.card.json
 
 # ---------------------------------------------------------------- lambda ----
 FROM public.ecr.aws/lambda/python:3.13 AS lambda
 ARG MODEL_SOURCE
+ARG MODEL_CARD
 COPY requirements-lambda.txt .
 RUN pip install --no-cache-dir -r requirements-lambda.txt
 COPY app/ ${LAMBDA_TASK_ROOT}/app/
 COPY ${MODEL_SOURCE} ${LAMBDA_TASK_ROOT}/app/model.onnx
+COPY ${MODEL_CARD} ${LAMBDA_TASK_ROOT}/app/model.card.json
 CMD ["app.lambda_handler.handler"]
 
 # --------------------------------------------------------------- runtime ----
 # Last on purpose: a plain `docker build .` should give the ordinary service.
 FROM python:3.13-slim AS runtime
 ARG MODEL_SOURCE
+ARG MODEL_CARD
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PORT=8080
 WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY ${MODEL_SOURCE} ./app/model.onnx
+COPY ${MODEL_CARD} ./app/model.card.json
 # Nothing here needs root.
 RUN useradd --system --uid 10001 service && chown -R service /srv
 USER service

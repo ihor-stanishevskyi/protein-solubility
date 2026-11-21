@@ -178,9 +178,15 @@ jobs:
           rs = body["results"]
           assert len(rs) == 2, rs
           assert all(0.0 <= r["probability_soluble"] <= 1.0 for r in rs), rs
-          # The limits travel with the answer or the number invites too much trust.
-          assert body["performance"]["mcc"] == 0.4754, body
-          assert "not advice" in body["caveat"], body
+          # The card travels with the weights, so whatever is loaded, the
+          # answer states what it is. What must never happen is a model with
+          # no provenance answering as though it had some.
+          card = body["model"]
+          assert card["kind"] in ("stand-in", "trained"), card
+          if card["answers_mean_nothing"]:
+              assert "MEAN NOTHING" in body["caveat"], body
+          else:
+              assert card["mcc"] and "not advice" in body["caveat"], body
           print(f"live: {rs[0]['call']} {rs[0]['probability_soluble']}, "
                 f"{rs[1]['call']} {rs[1]['probability_soluble']}")
           PY

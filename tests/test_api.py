@@ -23,13 +23,47 @@ def test_health_reports_what_was_actually_checked():
     assert "not one of the right size in the wrong order" in b["vocabulary_check"]
 
 
-def test_every_answer_carries_the_model_s_measured_limits():
-    """A bare number between 0 and 1 invites more confidence than MCC 0.475
-    has earned, so the figure travels with the answer, not only the README."""
+def test_a_stand_in_model_is_never_served_under_the_real_one_s_score():
+    """Nearly shipped: the measured numbers were written into the code, so the
+    placeholder would have answered with random probabilities under MCC 0.475 -
+    a service confidently quoting a score its weights had not earned.
+
+    The card now travels with the weights. Running the stand-in, the service
+    has to say so, loudly, in every answer."""
     for body in (client.get("/health").json(),
                  client.post("/predict", json={"sequences": [GFP]}).json()):
-        assert body["performance"]["mcc"] == 0.4754
-        assert "not advice" in body["caveat"]
+        assert body["model"]["kind"] == "stand-in"
+        assert body["model"]["mcc"] is None
+        assert "MEAN NOTHING" in body["caveat"]
+        assert "0.475" not in body["caveat"]
+
+
+def test_a_model_with_no_card_is_treated_as_unknown_not_as_good(tmp_path):
+    """Absence of a claim must not read as a good claim."""
+    import shutil
+
+    src = pathlib.Path(__file__).resolve().parent.parent / "models" / "stand-in.onnx"
+    lonely = tmp_path / "nameless.onnx"
+    shutil.copy(src, lonely)
+    p = Predictor(lonely)
+    assert p.card["kind"] == "unknown"
+    assert p.card["answers_mean_nothing"] is True
+
+
+def test_a_real_card_restores_the_real_caveat(tmp_path):
+    import json as j
+    import shutil
+
+    src = pathlib.Path(__file__).resolve().parent.parent / "models" / "stand-in.onnx"
+    m = tmp_path / "pretend-real.onnx"
+    shutil.copy(src, m)
+    m.with_suffix(".card.json").write_text(j.dumps({
+        "kind": "trained", "name": "fine-tuned ESM-2 35M", "answers_mean_nothing": False,
+        "mcc": 0.4754, "auroc": 0.8344, "accuracy": 0.7361,
+        "trained_on": "DeepSol", "measured": "2026-11-07"}))
+    from app.main import caveat
+    c = caveat(Predictor(m).card)
+    assert "0.4754" in c and "not advice" in c and "MEAN NOTHING" not in c
 
 
 def test_predict_returns_a_probability_and_a_call_that_agree():

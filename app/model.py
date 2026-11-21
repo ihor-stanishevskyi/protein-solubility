@@ -23,6 +23,7 @@ model has been fully vouched for.
 from __future__ import annotations
 
 import functools
+import json
 import os
 import pathlib
 
@@ -33,6 +34,32 @@ from .tokenizer import EsmTokenizer
 
 MODEL_FILE = pathlib.Path(os.environ.get(
     "MODEL_PATH", pathlib.Path(__file__).with_name("model.onnx")))
+
+# The measured numbers belong to a particular set of weights, so they ship
+# beside those weights rather than living in the code. Hardcoding them meant a
+# stand-in model would have been served under the real model's MCC - the
+# service confidently quoting a score it had not earned, which is the exact
+# failure this project's sibling exists to catch.
+UNKNOWN_CARD = {
+    "kind": "unknown",
+    "name": "unidentified model",
+    "what_it_is": "No card shipped beside this model file, so nothing is known "
+                  "about how it was trained or how well it does.",
+    "answers_mean_nothing": True,
+    "mcc": None, "auroc": None, "accuracy": None, "trained_on": None, "measured": None,
+}
+
+
+def load_card(model_file: pathlib.Path) -> dict:
+    card = model_file.with_suffix(".card.json")
+    if not card.exists():
+        return dict(UNKNOWN_CARD)
+    try:
+        return json.loads(card.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        return dict(UNKNOWN_CARD) | {
+            "what_it_is": f"The card beside this model is not readable ({e}), so "
+                          f"nothing is known about it."}
 
 CHECK_NOTE = ("the highest token id the model accepts matches the alphabet; this "
               "catches an alphabet of the wrong size, not one of the right size "
@@ -100,6 +127,7 @@ class Predictor:
                 f"would look fine and mean nothing. Refusing to serve.")
         self.vocab_verified = True
         self.vocab_check = CHECK_NOTE
+        self.card = load_card(model_file)
 
     def predict(self, sequences: list[str]) -> np.ndarray:
         ids, att = self.tok.encode(sequences)
