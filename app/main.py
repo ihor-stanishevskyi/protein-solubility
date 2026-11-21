@@ -1,0 +1,153 @@
+"""Protein solubility prediction, served with its own limits attached.
+
+The model is a fine-tuned ESM-2 35M. On the DeepSol test set it reaches MCC
+0.475 - clearly better than chance, and nowhere near a decision you would act
+on for a single protein. Every answer says so, because a bare number between 0
+and 1 invites more confidence than this model has earned.
+"""
+from __future__ import annotations
+
+import os
+from typing import Annotated
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
+
+from .model import VocabMismatch, predictor
+from .page import PAGE
+
+__version__ = "0.1.0"
+
+# What the model was measured at, and where. Quoted in every answer rather than
+# living only in a README nobody opens.
+PERFORMANCE = {
+    "trained_on": "DeepSol (proteinea/solubility), 62478 train / 2001 test",
+    "mcc": 0.4754,
+    "auroc": 0.8344,
+    "accuracy": 0.7361,
+    "measured": "2026-11-07, fine-tuned ESM-2 35M, 2 epochs",
+}
+CAVEAT = (
+    "MCC 0.475 on the DeepSol test set: better than chance by a wide margin, "
+    "and far from a decision you should act on for one protein. The training "
+    "set is E. coli expression data, so a prediction for a protein from another "
+    "organism or expression system is extrapolation. This is not a laboratory "
+    "result and not advice."
+)
+
+MAX_SEQUENCES = 64
+MAX_RESIDUES = 64 * 512
+
+app = FastAPI(
+    title="Protein solubility",
+    description="Fine-tuned ESM-2 35M, served on CPU. " + CAVEAT,
+    version=__version__,
+)
+
+
+class PredictRequest(BaseModel):
+    sequences: list[str] = Field(..., min_length=1, max_length=MAX_SEQUENCES,
+                                 description="Amino-acid sequences, one-letter code.")
+    names: list[str] | None = Field(None, description="Optional labels, same order.")
+
+
+@app.get("/", include_in_schema=False, response_class=HTMLResponse)
+def index():
+    return HTMLResponse(PAGE)
+
+
+@app.get("/health", tags=["ops"])
+def health():
+    try:
+        p = predictor()
+    except (FileNotFoundError, VocabMismatch) as e:
+        raise HTTPException(503, f"{type(e).__name__}: {e}") from e
+    return {
+        "status": "ok",
+        "version": __version__,
+        "model_file": p.path.name,
+        "alphabet_size": p.tok.size,
+        "max_residues_scored": p.tok.max_len,
+        # Whether the alphabet was actually checked against the model, not
+        # whether we hope it matches.
+        "vocabulary_checked_against_model": p.vocab_verified,
+        "vocabulary_check": p.vocab_check,
+        "performance": PERFORMANCE,
+        "caveat": CAVEAT,
+    }
+
+
+@app.post("/predict", tags=["predict"])
+def predict(req: PredictRequest):
+    from .tokenizer import unknown_residues
+
+    seqs = [s.strip() for s in req.sequences]
+    if any(not s for s in seqs):
+        raise HTTPException(400, "one of the sequences is empty")
+    total = sum(len(s) for s in seqs)
+    if total > MAX_RESIDUES:
+        raise HTTPException(413, f"{total} residues in one request; the limit is "
+                                 f"{MAX_RESIDUES}. Split them.")
+    if req.names is not None and len(req.names) != len(seqs):
+        raise HTTPException(400, f"{len(req.names)} names for {len(seqs)} sequences")
+
+    try:
+        p = predictor()
+    except (FileNotFoundError, VocabMismatch) as e:
+        raise HTTPException(503, f"{type(e).__name__}: {e}") from e
+
+    probs = p.predict(seqs)
+    results = []
+    for i, (s, prob) in enumerate(zip(seqs, probs, strict=True)):
+        odd = unknown_residues(s, p.tok)
+        results.append({
+            "name": req.names[i] if req.names else f"sequence_{i + 1}",
+            "length": len(s),
+            # Truncation is reported, never silent: a protein scored on its
+            # first 510 residues was not scored on the protein.
+            "scored_residues": min(len(s), p.tok.max_len - 2),
+            "truncated": len(s) > p.tok.max_len - 2,
+            "probability_soluble": round(float(prob), 4),
+            "call": "soluble" if prob > 0.5 else "insoluble",
+            "unrecognised_characters": odd or None,
+        })
+    return {"results": results, "performance": PERFORMANCE, "caveat": CAVEAT}
+
+
+@app.get("/example", tags=["predict"])
+def example(
+    which: Annotated[str, Query(description="green_fluorescent_protein or "
+                                           "inclusion_body_prone")] = "green_fluorescent_protein",
+):
+    """Two sequences to try, so the page has something to show immediately."""
+    if which not in EXAMPLES:
+        raise HTTPException(404, f"unknown example {which!r}; have {sorted(EXAMPLES)}")
+    return {"name": which, **EXAMPLES[which]}
+
+
+EXAMPLES = {
+    "green_fluorescent_protein": {
+        "sequence": (
+            "MSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTF"
+            "SYGVQCFSRYPDHMKQHDFFKSAMPEGYVQERTIFFKDDGNYKTRAEVKFEGDTLVNRIELKGI"
+            "DFKEDGNILGHKLEYNYNSHNVYIMADKQKNGIKVNFKIRHNIEDGSVQLADHYQQNTPIGDGP"
+            "VLLPDNHYLSTQSALSKDPNEKRDHMVLLEFVTAAGITHGMDELYK"),
+        "note": "GFP, the classic well-behaved soluble protein.",
+    },
+    "inclusion_body_prone": {
+        "sequence": (
+            "MGSSHHHHHHSSGLVPRGSHMASMTGGQQMGRGSEFGFFFFLLLLWWWWIIIIVVVVAAAA"
+            "FFFFLLLLWWWWIIIIVVVVAAAAFFFFLLLLWWWWIIIIVVVV"),
+        "note": "A hydrophobic stretch of the kind that tends to aggregate. "
+                "Invented for illustration, not a real protein.",
+    },
+}
+
+if os.environ.get("CORS_ALLOW_ORIGINS"):
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in os.environ["CORS_ALLOW_ORIGINS"].split(",")],
+        allow_methods=["GET", "POST"], allow_headers=["content-type"],
+    )

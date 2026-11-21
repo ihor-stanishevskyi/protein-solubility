@@ -1,0 +1,8 @@
+# Runtime. Deliberately small: torch's wheel alone is 539 MB against 28 MB for
+# onnxruntime, and on Lambda that difference is cold-start time on every
+# request that arrives at an idle function.
+fastapi==0.121.2
+uvicorn[standard]==0.41.0
+onnxruntime==1.29.0
+numpy==2.5.3
+pydantic==2.12.3

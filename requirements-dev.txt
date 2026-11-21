@@ -1,0 +1,8 @@
+-r requirements.txt
+pytest==9.0.1
+httpx==0.28.1
+ruff==0.15.4
+# Only for building the stand-in model and reading the graph in tests; the
+# runtime image does without it, and app/model.py says so when the vocabulary
+# check cannot be made for that reason.
+onnx==1.23.2
