@@ -57,6 +57,24 @@ imports something `requirements.txt` does not install.
 `/health` reports whether the check ran, and what it does not cover: it catches
 an alphabet of the wrong size, not one of the right size in the wrong order.
 
+## Infrastructure
+
+`infra/roles.yaml` creates both IAM roles: the one GitHub Actions assumes to
+deploy, and the one the function runs as. No access keys exist anywhere; CI
+authenticates with a short-lived OpenID Connect token.
+
+One detail worth copying. GitHub now puts numeric owner and repository ids in
+the token subject:
+
+```
+repo:owner@311364649/protein-solubility@1465118856:ref:refs/heads/main
+```
+
+The repository id cannot be known before the repository exists, and the AWS
+console wizard still writes the older format without it. The trust policy
+wildcards *only* that number and keeps owner, owner id, repository name and
+branch exact, which removes the create-fail-read-the-log-fix loop entirely.
+
 ## Running it
 
 ```bash

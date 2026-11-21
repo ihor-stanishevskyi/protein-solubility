@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Two roles for protein-solubility: the one GitHub Actions assumes to deploy,
+  and the one the function runs as. No access keys anywhere - CI authenticates
+  with a short-lived OpenID Connect token.
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: ihor-stanishevskyi
+  GitHubOwnerId:
+    Type: String
+    Default: "311364649"
+    Description: >
+      Numeric account id. GitHub now puts it in the token subject, and the
+      console's own wizard still writes the older format without it.
+  RepoName:
+    Type: String
+    Default: protein-solubility
+  FunctionName:
+    Type: String
+    Default: protein-solubility
+
+Resources:
+
+  # The function's own role: write logs, nothing else. A prediction service
+  # that reads nothing and stores nothing needs no other permission.
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${FunctionName}-lambda-exec"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${RepoName}-deploy"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  # GitHub sends the repository's numeric id in the subject and
+                  # it cannot be known before the repository exists. Only that
+                  # number is wildcarded; owner, owner id, repository name and
+                  # branch all stay exact, so this matches main of this
+                  # repository and nothing else.
+                  - !Sub "repo:${GitHubOwner}@${GitHubOwnerId}/${RepoName}@*:ref:refs/heads/main"
+                  # The older format, still written by the console wizard.
+                  - !Sub "repo:${GitHubOwner}/${RepoName}:ref:refs/heads/main"
+      Policies:
+        - PolicyName: deploy-this-service-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EcrLogin
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"           # this call takes no resource
+
+              - Sid: PushToThisRepositoryOnly
+                Effect: Allow
+                Action:
+                  - ecr:CreateRepository
+                  - ecr:DescribeRepositories
+                  - ecr:DescribeImages
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                Resource: !Sub "arn:aws:ecr:*:${AWS::AccountId}:repository/${RepoName}"
+
+              - Sid: DeployThisFunctionOnly
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:CreateFunctionUrlConfig
+                  - lambda:UpdateFunctionUrlConfig
+                  - lambda:GetFunctionUrlConfig
+                  - lambda:AddPermission
+                Resource: !Sub "arn:aws:lambda:*:${AWS::AccountId}:function:${FunctionName}"
+
+              - Sid: HandTheFunctionItsOwnRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt ExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+
+              - Sid: AlarmOnThisFunctionOnly
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DescribeAlarms
+                Resource: !Sub "arn:aws:cloudwatch:*:${AWS::AccountId}:alarm:${FunctionName}-*"
+
+Outputs:
+  DeployRoleArn:
+    Description: Put this in .github/workflows/deploy.yml as ROLE
+    Value: !GetAtt DeployRole.Arn
+  ExecutionRoleArn:
+    Description: The role the function runs as
+    Value: !GetAtt ExecutionRole.Arn
