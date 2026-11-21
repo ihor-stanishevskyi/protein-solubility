@@ -18,7 +18,9 @@ def test_health_reports_what_was_actually_checked():
     assert b["alphabet_size"] == 33
     # Not "we hope it matches" - whether the comparison was made.
     assert b["vocabulary_checked_against_model"] is True
-    assert "word_embeddings" in b["vocabulary_check"]
+    # And it says what the check does NOT cover, rather than implying the
+    # model has been fully vouched for.
+    assert "not one of the right size in the wrong order" in b["vocabulary_check"]
 
 
 def test_every_answer_carries_the_model_s_measured_limits():
@@ -104,10 +106,16 @@ def test_index_is_a_self_contained_page():
     assert "http://" not in r.text and "https://" not in r.text
 
 
-def test_a_mismatched_alphabet_stops_the_service_instead_of_answering(tmp_path):
+@pytest.mark.parametrize(("rows", "shown"), [(38, "38"), (20, "20")])
+def test_a_mismatched_alphabet_stops_the_service_instead_of_answering(tmp_path, rows, shown):
     """The failure this guards against: vocab.json and the model from different
     runs means every residue maps to the wrong token, and the answers look
-    exactly as plausible as correct ones."""
+    exactly as plausible as correct ones.
+
+    Both directions are tested. The first version of the guard only ever saw
+    the file it was configured with rather than the one being served, so it
+    could not fail at all - and a check that cannot fail reads like protection
+    while providing none."""
     import onnx
     from onnx import numpy_helper
 
@@ -116,14 +124,36 @@ def test_a_mismatched_alphabet_stops_the_service_instead_of_answering(tmp_path):
     for t in m.graph.initializer:
         if "word_embeddings" in t.name:
             a = numpy_helper.to_array(t)
-            t.CopyFrom(numpy_helper.from_array(
-                np.vstack([a, a[:5]]).astype(np.float32), t.name))   # 33 -> 38
-    bad = tmp_path / "wrong_vocab.onnx"
+            grown = np.vstack([a] * 3)[:rows] if rows > len(a) else a[:rows]
+            t.CopyFrom(numpy_helper.from_array(grown.astype(np.float32), t.name))
+    bad = tmp_path / f"wrong_vocab_{rows}.onnx"
     onnx.save(m, bad)
 
     with pytest.raises(VocabMismatch) as e:
         Predictor(bad)
-    assert "38" in str(e.value) and "33" in str(e.value)
+    assert shown in str(e.value) and "33" in str(e.value)
+
+
+def test_the_guard_needs_nothing_the_runtime_image_lacks():
+    """It failed in production once because it used `onnx`, which is a build
+    dependency and absent from the image. Whatever it imports now has to be in
+    the runtime requirements, or dev passes while production does nothing."""
+    import pathlib as pl
+    import sys
+
+    here = pl.Path(__file__).resolve().parent.parent
+    runtime = (here / "requirements.txt").read_text()
+    for name in ("model", "tokenizer", "main", "page"):
+        for line in (here / "app" / f"{name}.py").read_text().splitlines():
+            if not (line.startswith("import ") or line.startswith("from ")):
+                continue
+            mod = line.split()[1].split(".")[0]
+            # Relative imports and the standard library ship with Python.
+            if not mod or mod.startswith(".") or mod in sys.stdlib_module_names:
+                continue
+            assert mod in runtime, (
+                f"app/{name}.py imports {mod!r}, which requirements.txt does not "
+                f"install - it would work in tests and be missing in the image")
 
 
 def test_a_missing_model_is_a_clear_failure_not_a_stack_trace(tmp_path):

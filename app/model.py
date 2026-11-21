@@ -1,13 +1,24 @@
-"""Loading the model, and refusing to serve one the vocabulary does not fit.
+"""Loading the model, and refusing to serve one the alphabet does not fit.
 
-The danger this guards against is specific. If vocab.json and the model come
-from different runs, every residue maps to the wrong token and the service
-returns confident, plausible, meaningless probabilities - the exact failure
-mode of the library this project's sibling exists to catch. So the embedding's
-first dimension is compared with the alphabet, and a mismatch is fatal.
+The danger is specific. If vocab.json and model.onnx come from different runs,
+every residue maps to the wrong token and the service returns confident,
+plausible, meaningless probabilities - the exact failure this project's sibling
+exists to catch in someone else's library.
 
-Where the check cannot be made, the service says so in /health instead of
-implying it passed.
+How the check is made matters as much as that it exists. The first version read
+the model's embedding matrix with the `onnx` library, which is a build-time
+dependency and deliberately absent from the runtime image - so the guard passed
+in tests and did nothing in production, which CI caught by asking the running
+container whether the check had happened.
+
+So it is done by asking the model instead of reading it. onnxruntime enforces
+embedding bounds, so the highest token id the model accepts IS its vocabulary
+size. Same code in both environments, no extra dependency, and it tests
+behaviour rather than metadata.
+
+What it catches: an alphabet of the wrong size. What it does not: an alphabet
+of the right size in the wrong order. /health says so rather than implying the
+model has been fully vouched for.
 """
 from __future__ import annotations
 
@@ -23,39 +34,40 @@ from .tokenizer import EsmTokenizer
 MODEL_FILE = pathlib.Path(os.environ.get(
     "MODEL_PATH", pathlib.Path(__file__).with_name("model.onnx")))
 
-EMBEDDING_HINTS = ("word_embeddings", "embed_tokens", "embeddings.weight")
+CHECK_NOTE = ("the highest token id the model accepts matches the alphabet; this "
+              "catches an alphabet of the wrong size, not one of the right size "
+              "in the wrong order")
 
 
 class VocabMismatch(RuntimeError):
     pass
 
 
-def _declared_vocab(model_file: pathlib.Path) -> tuple[int | None, str]:
-    """The model's own idea of how many tokens exist, if it can be found.
+def _accepts(sess: ort.InferenceSession, token_id: int) -> bool:
+    ids = np.array([[token_id]], dtype=np.int64)
+    try:
+        sess.run(None, {"input_ids": ids, "attention_mask": np.ones_like(ids)})
+    except Exception:  # noqa: BLE001 - any refusal means out of range
+        return False
+    return True
 
-    Takes the path being served, not the module default. The first version read
-    MODEL_FILE while the session ran a different file, so the guard inspected
-    one model and cleared another - a check that cannot fail is worse than no
-    check, because it reads like protection. A test caught it.
-    """
-    try:
-        import onnx
-    except ImportError:
-        return None, "onnx not installed in the runtime image, by design"
-    try:
-        g = onnx.load(str(model_file), load_external_data=False).graph
-    except Exception as e:  # noqa: BLE001 - onnx raises many types; the point is
-        # that the failure is reported out through /health rather than swallowed,
-        # so the reader knows the check did not happen.
-        return None, f"graph could not be read: {type(e).__name__}"
-    named = [t for t in g.initializer
-             if any(h in t.name for h in EMBEDDING_HINTS) and len(t.dims) == 2]
-    if named:
-        return named[0].dims[0], f"from {named[0].name}"
-    small = [t for t in g.initializer if len(t.dims) == 2 and t.dims[0] < 1000]
-    if len(small) == 1:
-        return small[0].dims[0], f"from {small[0].name} (only 2-D candidate)"
-    return None, "no embedding matrix identified in the graph"
+
+def _model_vocab(sess: ort.InferenceSession, limit: int = 1 << 20) -> int:
+    """Largest accepted id plus one, by bisection. Only called when something
+    already looks wrong, so the extra forward passes cost nothing in the
+    ordinary case."""
+    if not _accepts(sess, 0):
+        return 0
+    lo, hi = 0, 1
+    while hi < limit and _accepts(sess, hi):
+        lo, hi = hi, hi * 2
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        if _accepts(sess, mid):
+            lo = mid
+        else:
+            hi = mid
+    return lo + 1
 
 
 class Predictor:
@@ -67,19 +79,27 @@ class Predictor:
         self.path = model_file
         self.tok = EsmTokenizer.load()
         opts = ort.SessionOptions()
-        # One thread: Lambda gives one core per 1769 MB, and onnxruntime
-        # spinning up a pool it cannot use costs cold-start time.
+        # One thread: Lambda gives one core per 1769 MB, and a pool it cannot
+        # use costs cold-start time.
         opts.intra_op_num_threads = int(os.environ.get("ORT_THREADS", "1"))
+        # The probe below deliberately feeds an out-of-range id, and
+        # onnxruntime logs that at error level. It is expected, so it is not
+        # printed - a scary log line for a check that is working teaches people
+        # to ignore the logs.
+        opts.log_severity_level = 4
         self.sess = ort.InferenceSession(str(model_file), opts,
                                          providers=["CPUExecutionProvider"])
-        declared, how = _declared_vocab(model_file)
-        self.vocab_check = how
-        if declared is not None and declared != self.tok.size:
+
+        size = self.tok.size
+        fits = _accepts(self.sess, size - 1) and not _accepts(self.sess, size)
+        if not fits:
+            found = _model_vocab(self.sess)
             raise VocabMismatch(
-                f"the model expects {declared} tokens, the alphabet in vocab.json "
-                f"has {self.tok.size}. Every residue would map to the wrong token "
-                f"and the answers would look fine and mean nothing. Refusing.")
-        self.vocab_verified = declared is not None
+                f"the model accepts {found} tokens, the alphabet in vocab.json has "
+                f"{size}. Every residue would map to the wrong token and the answers "
+                f"would look fine and mean nothing. Refusing to serve.")
+        self.vocab_verified = True
+        self.vocab_check = CHECK_NOTE
 
     def predict(self, sequences: list[str]) -> np.ndarray:
         ids, att = self.tok.encode(sequences)

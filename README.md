@@ -44,9 +44,18 @@ plausible, meaningless probabilities — the failure this project's
 [sibling](https://github.com/ihor-stanishevskyi/clock-audit) exists to catch in
 someone else's library.
 
-So on startup the alphabet is compared against the model's own embedding matrix,
-and a mismatch stops the service rather than letting it answer. `/health` reports
-whether that comparison actually happened, not whether we hope it passed.
+So on startup the service asks the model directly: onnxruntime enforces
+embedding bounds, so the highest token id the model accepts *is* its vocabulary
+size. A mismatch stops the service rather than letting it answer.
+
+The first version read the embedding matrix with the `onnx` library instead -
+which is a build dependency, absent from the runtime image. The guard passed in
+tests and did nothing in production. CI caught it by asking the running
+container whether the check had happened; a test now fails if anything in `app/`
+imports something `requirements.txt` does not install.
+
+`/health` reports whether the check ran, and what it does not cover: it catches
+an alphabet of the wrong size, not one of the right size in the wrong order.
 
 ## Running it
 
