@@ -85,6 +85,11 @@ Resources:
                   - ecr:UploadLayerPart
                   - ecr:CompleteLayerUpload
                   - ecr:PutImage
+                  # A container function is pulled by the Lambda service, not
+                  # by the role that pushed it, so the repository itself has to
+                  # allow that pull. Setting that policy needs these two.
+                  - ecr:GetRepositoryPolicy
+                  - ecr:SetRepositoryPolicy
                 Resource: !Sub "arn:aws:ecr:*:${AWS::AccountId}:repository/${RepoName}"
 
               - Sid: DeployThisFunctionOnly

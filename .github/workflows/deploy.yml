@@ -64,6 +64,30 @@ jobs:
             || aws ecr create-repository --repository-name "$ECR_REPO" \
                  --image-scanning-configuration scanOnPush=true >/dev/null
 
+      - name: let the Lambda service pull from this repository
+        run: |
+          set -euo pipefail
+          # Creating the function fails with "Lambda does not have permission
+          # to access the ECR image" without this: the image is pulled by the
+          # service, not by the role that pushed it. Scoped to functions in
+          # this account, so the repository is not readable by anyone else.
+          aws ecr set-repository-policy --repository-name "$ECR_REPO" \
+            --policy-text "$(cat <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Sid": "LambdaPull",
+              "Effect": "Allow",
+              "Principal": {"Service": "lambda.amazonaws.com"},
+              "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+              "Condition": {"StringLike": {
+                "aws:sourceArn": "arn:aws:lambda:us-east-1:031391485774:function:*"}}
+            }]
+          }
+          JSON
+          )" >/dev/null
+          echo "the Lambda service may now pull this image"
+
       - uses: aws-actions/amazon-ecr-login@v2
         id: ecr
 
