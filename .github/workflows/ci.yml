@@ -43,6 +43,17 @@ jobs:
           tags: solubility:ci
           provenance: false
 
+      # The Lambda stage was unbuilt until deploy time, so a broken one was
+      # only discovered in AWS. Both targets get built here now.
+      - name: build the lambda image too
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: lambda
+          load: true
+          tags: solubility:lambda-ci
+          provenance: false
+
       - name: it has to stay small
         run: |
           MB=$(docker image inspect solubility:ci --format '{{.Size}}' | awk '{print int($1/1048576)}')

@@ -17,7 +17,9 @@ ARG MODEL_CARD=models/stand-in.card.json
 FROM public.ecr.aws/lambda/python:3.13 AS lambda
 ARG MODEL_SOURCE
 ARG MODEL_CARD
-COPY requirements-lambda.txt .
+# Both files: requirements-lambda.txt starts with "-r requirements.txt", so
+# copying only the first leaves pip looking for a file that is not there.
+COPY requirements.txt requirements-lambda.txt ./
 RUN pip install --no-cache-dir -r requirements-lambda.txt
 COPY app/ ${LAMBDA_TASK_ROOT}/app/
 COPY ${MODEL_SOURCE} ${LAMBDA_TASK_ROOT}/app/model.onnx
