@@ -343,3 +343,12 @@ def test_no_dataset_name_is_written_into_the_code():
     source += (HERE / "app" / "page.py").read_text(encoding="utf-8")
     named = re.findall(r"DeepSol|proteinea|UniProt|SwissProt", source, re.I)
     assert not named, f"a dataset is named in the code: {named}"
+
+
+def test_the_readme_links_somewhere_real():
+    """A portfolio repository whose demo link is `#` is worse than none."""
+    import re
+    readme = (HERE / "README.md").read_text(encoding="utf-8")
+    try_it = re.search(r"\*\*\[Try it\]\(([^)]*)\)\*\*", readme)
+    assert try_it, "the README no longer has a Try it link"
+    assert try_it.group(1).startswith("https://"), try_it.group(1)

@@ -4,16 +4,29 @@ Will this protein express solubly in *E. coli*? A fine-tuned ESM-2 (35M) gives a
 probability, served on AWS Lambda from a container, with no PyTorch anywhere near
 the runtime.
 
-**[Try it](#)** · the live URL goes here once the first deploy lands.
+**[Try it](https://lcfxj6aqrznnjwfe7agp5j3pam0yhtva.lambda-url.us-east-1.on.aws/)**
 
-## What the number is worth
+> **What is deployed right now is a stand-in, not the trained model** — a 1.7 KB
+> graph with the real one's input and output signature and random weights. The
+> service says so itself, in red, on every page and in every answer. It is live
+> ahead of the weights so that the deployment, the permissions and the page
+> could be tested before there was a model to risk.
+>
+> Do not take the numbers in the next section as the numbers the link returns.
+> `/health` always reports which weights are loaded and what they scored; that
+> endpoint, not this file, is the truth about the running service.
+
+## What the number will be worth
+
+From the training run of 2026-11-07, on an RTX 4090. These are the weights
+being deployed, not a target:
 
 | | |
 |---|---|
 | MCC | **0.475** |
 | AUROC | 0.834 |
 | Accuracy | 73.6% |
-| Measured on | DeepSol test split, 2001 proteins, 2026-11-07 |
+| Measured on | the solubility test split, 2001 proteins |
 
 0.475 is clearly better than chance and clearly not a decision. It is the
 difference between *"rank these 200 constructs and try the top 20 first"* and
@@ -86,15 +99,26 @@ uvicorn app.main:app --reload
 The repository ships a stand-in model (`models/stand-in.onnx`, 1.7 KB) with the
 real one's input and output signature. Its answers are meaningless on purpose:
 tests that needed the trained weights would be testing the model, not the
-service. The image bakes that stand-in in by default and CI overrides
-`MODEL_SOURCE` with the real one.
+service. The image bakes that stand-in in by default; the deploy workflow
+replaces it with the trained weights when they are present in the project's S3
+bucket, and says in its job summary which of the two it shipped.
+
+Nothing the service claims about a model is written in the code. The score, the
+set it was measured on, the alphabet and the wording of the caveat all come from
+a card built by `scripts/build_card.py` out of the training run's own
+`metrics.json`, and travel in the image beside the weights they describe. A run
+that lost one of its measurements produces a card that says the answers mean
+nothing; a run that drifts from the reference says so in the caveat. The reason
+is in the git history: the page spent an afternoon claiming the real model's
+accuracy above the random-weights stand-in, because that sentence had been typed
+into the HTML while the plan was still that the real weights would be there.
 
 ## Endpoints
 
 | | |
 |---|---|
 | `GET /` | the page a person opens |
-| `GET /health` | status, alphabet size, whether the vocabulary check ran, measured performance |
+| `GET /health` | status, alphabet size, whether the vocabulary check ran, and the card of the weights actually loaded |
 | `POST /predict` | `{"sequences": [...]}` → probability per sequence |
 | `GET /example` | two sequences to try |
 
@@ -104,5 +128,5 @@ sequence, never applied silently.
 
 ## Not a laboratory result
 
-Trained on *E. coli* expression data. A prediction for another organism or
-expression system is extrapolation. This is not advice.
+Trained on bacterial expression data. A prediction for a protein from another
+organism or expression system is extrapolation. This is not advice.
