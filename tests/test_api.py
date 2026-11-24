@@ -1,10 +1,12 @@
+import importlib.util
+import json
 import pathlib
 
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import MAX_RESIDUES, app
+from app.main import MAX_RESIDUES, app, caveat
 from app.model import Predictor, VocabMismatch
 
 client = TestClient(app)
@@ -248,3 +250,96 @@ def test_the_page_can_say_the_model_is_hollow():
 def test_the_caveat_reads_as_one_sentence():
     b = client.get("/health").json()
     assert ".." not in b["caveat"]
+
+
+# --- the card the weights arrive with -----------------------------------
+#
+# The card is the only thing standing between a set of weights and the claim
+# the service makes about them. These tests are about that gate, not about any
+# particular model: they run against cards built by scripts/build_card.py from
+# the measurements a training run wrote down.
+
+HERE = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _load_builder():
+    """Load the very script CI runs, rather than a copy of its logic."""
+    spec = importlib.util.spec_from_file_location(
+        "build_card", HERE / "scripts" / "build_card.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+build_card = _load_builder()
+MEASURED_RUN = {
+    "model": "facebook/esm2_t12_35M_UR50D", "epochs": 2,
+    "trained_on": "Colab T4, fp16 AMP", "n_train": 62478, "n_test": 2001,
+    "mcc": 0.4691, "auroc": 0.8302, "accuracy": 0.7337,
+    "reference_2026_11_07": {"mcc": 0.4754, "auroc": 0.8344},
+}
+
+
+def make_card(tmp_path, metrics: dict) -> dict:
+    card = build_card.build(metrics, "2026-11-24")
+    # Round-trip through JSON: the card reaches the service as a file, so a
+    # value that cannot be written is a value the service will never see.
+    out = tmp_path / "model.card.json"
+    out.write_text(json.dumps(card, ensure_ascii=False), encoding="utf-8")
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_the_card_carries_the_measured_numbers_unchanged(tmp_path):
+    card = make_card(tmp_path, MEASURED_RUN)
+    assert card["answers_mean_nothing"] is False
+    for k in ("mcc", "auroc", "accuracy"):
+        assert card[k] == MEASURED_RUN[k], f"{k} changed on the way to the card"
+
+
+def test_a_run_that_lost_a_measurement_cannot_claim_anything(tmp_path):
+    """Half a metrics file must not become a confident model card."""
+    for drop in ("mcc", "auroc", "accuracy"):
+        metrics = {k: v for k, v in MEASURED_RUN.items() if k != drop}
+        card = make_card(tmp_path, metrics)
+        assert card["answers_mean_nothing"] is True, f"missing {drop} still claimed a score"
+        assert "MEAN NOTHING" in caveat(card)
+
+
+def test_the_hardware_never_becomes_the_dataset(tmp_path):
+    """metrics.json calls the GPU `trained_on`; the page prints the card's
+    measured_on as 'MCC x on <this>'. Copying one into the other would put
+    'MCC 0.47 on Colab T4' in front of a reader."""
+    card = make_card(tmp_path, MEASURED_RUN)
+    for field in ("measured_on", "trained_on"):
+        assert "Colab" not in (card[field] or ""), f"hardware leaked into {field}"
+        assert "T4" not in (card[field] or "")
+    assert "Colab T4" in card["what_it_is"], "the hardware should still be recorded somewhere"
+
+
+def test_a_run_that_did_not_reproduce_the_reference_says_so(tmp_path):
+    card = make_card(tmp_path, MEASURED_RUN | {"mcc": 0.31})
+    assert card["reproduces_reference"] is False
+    assert "0.4754" in caveat(card), "the gap to the reference is not mentioned"
+
+    ok = make_card(tmp_path, MEASURED_RUN)
+    assert ok["reproduces_reference"] is True
+    assert "unexplained" not in caveat(ok)
+
+
+def test_the_verdict_phrase_follows_the_number(tmp_path):
+    """One fixed phrase would praise a useless model in a good model's words."""
+    strong = caveat(make_card(tmp_path, MEASURED_RUN))
+    weak = caveat(make_card(tmp_path, MEASURED_RUN | {"mcc": 0.06}))
+    assert "wide margin" in strong
+    assert "wide margin" not in weak
+    assert "barely distinguishable from chance" in weak
+
+
+def test_no_dataset_name_is_written_into_the_code():
+    """The caveat named the DeepSol test set for a day while the weights were
+    a 1.7 KB random graph. The set is a property of the run, not of the code."""
+    import re
+    source = (HERE / "app" / "main.py").read_text(encoding="utf-8")
+    source += (HERE / "app" / "page.py").read_text(encoding="utf-8")
+    named = re.findall(r"DeepSol|proteinea|UniProt|SwissProt", source, re.I)
+    assert not named, f"a dataset is named in the code: {named}"

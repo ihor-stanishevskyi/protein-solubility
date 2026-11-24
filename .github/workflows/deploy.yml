@@ -25,6 +25,7 @@ env:
   FUNCTION: protein-solubility
   ECR_REPO: protein-solubility
   ROLE: arn:aws:iam::031391485774:role/protein-solubility-deploy
+  WEIGHTS_BUCKET: protein-solubility-weights-031391485774
 
 jobs:
   deploy:
@@ -93,6 +94,92 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # Either the trained weights are in the bucket and go into the image, or
+      # they are not and the stand-in does. Which of the two happened is stated
+      # in the log and in the job summary - never decided quietly.
+      - name: take the trained weights if they have been uploaded
+        id: weights
+        run: |
+          set -euo pipefail
+          mkdir -p build-weights
+          # ListBucket is granted precisely so a missing key reads as missing
+          # rather than as forbidden. Without it S3 answers 403 for both.
+          if ! FOUND=$(aws s3api list-objects-v2 --bucket "$WEIGHTS_BUCKET" \
+                         --prefix model.onnx --query 'length(Contents)' --output text 2>&1); then
+            # No bucket yet means the infrastructure update has not been applied,
+            # which is a known waypoint, not a broken deploy. Anything else -
+            # above all AccessDenied - is a real fault and must not be papered
+            # over by quietly shipping the stand-in.
+            case "$FOUND" in
+              *NoSuchBucket*)
+                echo "::warning::s3://$WEIGHTS_BUCKET does not exist yet - stand-in it is."
+                FOUND=0 ;;
+              *) echo "::error::could not list s3://$WEIGHTS_BUCKET - $FOUND"; exit 1 ;;
+            esac
+          fi
+
+          if [ "$FOUND" = "None" ] || [ "$FOUND" = "0" ]; then
+            echo "kind=stand-in" >> "$GITHUB_OUTPUT"
+            echo "No model.onnx in s3://$WEIGHTS_BUCKET - deploying the stand-in."
+            echo "### Deployed the STAND-IN" >> "$GITHUB_STEP_SUMMARY"
+            echo "No \`model.onnx\` in \`s3://$WEIGHTS_BUCKET\`. The service will" \
+                 "say its answers mean nothing, because they do." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          for f in model.onnx vocab.json metrics.json; do
+            aws s3 cp "s3://$WEIGHTS_BUCKET/$f" "build-weights/$f" --no-progress
+          done
+          ls -l build-weights
+
+          # The card is built from the measurements, never written by hand.
+          python3 scripts/build_card.py build-weights/metrics.json \
+                  build-weights/model.card.json \
+                  --measured "$(date -u +%Y-%m-%d)"
+
+          python3 - <<'PY'
+          import json, os, pathlib
+          card = json.loads(pathlib.Path("build-weights/model.card.json").read_text())
+          hollow = card["answers_mean_nothing"]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"kind={'incomplete' if hollow else 'trained'}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              if hollow:
+                  fh.write("### Weights uploaded, but their measurements are incomplete\n")
+                  fh.write("The service will keep saying its answers mean nothing.\n")
+              else:
+                  fh.write("### Deployed the TRAINED model\n")
+                  fh.write(f"MCC {card['mcc']}, AUROC {card['auroc']} "
+                           f"on {card['measured_on']}.\n")
+          print(json.dumps(card, indent=2))
+          PY
+
+      # A 140 MB download can arrive truncated, and an ONNX graph exported with
+      # the wrong alphabet scores every sequence on the wrong residues without
+      # looking broken. Both are cheaper to find here than in production, and
+      # the check is the service's own loading code, not an imitation of it.
+      - name: make the weights prove themselves before they are shipped
+        if: steps.weights.outputs.kind != 'stand-in'
+        run: |
+          set -euo pipefail
+          pip install --quiet -r requirements.txt
+          cp build-weights/vocab.json      app/vocab.json
+          cp build-weights/model.onnx      app/_check.onnx
+          cp build-weights/model.card.json app/_check.card.json
+          MODEL_PATH=app/_check.onnx python3 - <<'PY'
+          from app.model import predictor
+          p = predictor()
+          print("alphabet:", p.tok.size, "| vocabulary verified:", p.vocab_verified)
+          assert p.vocab_verified, "the alphabet does not match the model"
+          probs = p.predict(["MKTVRQERLKSIVRILERSKEPVSGAQ", "MKTV"])
+          print("probabilities:", probs)
+          assert all(0.0 <= x <= 1.0 for x in probs), probs
+          assert probs[0] != probs[1], "the model returns the same number for different proteins"
+          print("card:", p.card["name"], "| MCC", p.card["mcc"])
+          PY
+          git checkout -- app/vocab.json
+          rm app/_check.onnx app/_check.card.json
+
       - name: build and push the Lambda image
         uses: docker/build-push-action@v6
         with:
@@ -101,6 +188,10 @@ jobs:
           push: true
           provenance: false
           tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+          build-args: |
+            MODEL_SOURCE=${{ steps.weights.outputs.kind == 'stand-in' && 'models/stand-in.onnx' || 'build-weights/model.onnx' }}
+            MODEL_CARD=${{ steps.weights.outputs.kind == 'stand-in' && 'models/stand-in.card.json' || 'build-weights/model.card.json' }}
+            MODEL_VOCAB=${{ steps.weights.outputs.kind == 'stand-in' && 'app/vocab.json' || 'build-weights/vocab.json' }}
 
       - name: create or update the function
         id: fn
@@ -186,9 +277,9 @@ jobs:
             exit 1
           fi
           cat health.json; echo
-          python3 - "$URL" <<'PY'
+          python3 - "$URL" "${{ steps.weights.outputs.kind }}" <<'PY'
           import json, sys, urllib.request
-          url = sys.argv[1]
+          url, expected = sys.argv[1], sys.argv[2]
           h = json.load(urllib.request.urlopen(url + "health", timeout=30))
           assert h["status"] == "ok", h
           # The guard has to be live out here, not only in the test suite.
@@ -207,6 +298,16 @@ jobs:
           # no provenance answering as though it had some.
           card = body["model"]
           assert card["kind"] in ("stand-in", "trained"), card
+          # The build knows which weights it put in. If the live service reports
+          # anything else, something between here and Lambda served a different
+          # image, and that must fail loudly rather than pass as "it answered".
+          if expected == "stand-in":
+              assert card["kind"] == "stand-in", (expected, card)
+          elif expected == "trained":
+              assert card["kind"] == "trained" and not card["answers_mean_nothing"], \
+                  (expected, card)
+          else:
+              assert card["answers_mean_nothing"], (expected, card)
           if card["answers_mean_nothing"]:
               assert "MEAN NOTHING" in body["caveat"], body
           else:

@@ -7,5 +7,7 @@
   "mcc": null,
   "auroc": null,
   "accuracy": null,
-  "measured": null
+  "measured": null,
+  "measured_on": null,
+  "scope": null
 }

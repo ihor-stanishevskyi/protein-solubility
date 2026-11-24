@@ -19,12 +19,31 @@ from .page import PAGE
 
 __version__ = "0.1.0"
 
+# The score AND the set it was measured on both come from the card. Naming a
+# dataset here would be the same defect as naming a score here: the sentence
+# outlives the weights it was written for.
 REAL_CAVEAT = (
-    "MCC {mcc} on the DeepSol test set: better than chance by a wide margin, "
-    "and far from a decision you should act on for one protein. The training "
-    "set is E. coli expression data, so a prediction for a protein from another "
-    "organism or expression system is extrapolation. This is not a laboratory "
-    "result and not advice."
+    "MCC {mcc} on {measured_on}: {standing}, and far from a decision you should "
+    "act on for one protein. {scope} This is not a laboratory result and not "
+    "advice."
+)
+
+
+def standing(mcc: float | None) -> str:
+    """Describe the score the weights actually got, not the one we hoped for.
+
+    A fixed phrase here would praise a bad model in the same words as a good
+    one - the template asserting what only the number can say.
+    """
+    if mcc is None:
+        return "no score was recorded"
+    if mcc >= 0.3:
+        return "better than chance by a wide margin"
+    if mcc >= 0.1:
+        return "better than chance, but not by much"
+    return "barely distinguishable from chance"
+DEFAULT_SCOPE = (
+    "A prediction for a protein unlike those it was trained on is extrapolation."
 )
 HOLLOW_CAVEAT = (
     "THESE NUMBERS MEAN NOTHING. This service is running a {name}, not a trained "
@@ -38,7 +57,12 @@ def caveat(card: dict) -> str:
     if card.get("answers_mean_nothing"):
         what = (card.get("what_it_is") or "").strip().rstrip(".")
         return HOLLOW_CAVEAT.format(name=card.get("name", "placeholder"), what=what)
-    return REAL_CAVEAT.format(mcc=card.get("mcc"))
+    return REAL_CAVEAT.format(
+        mcc=card.get("mcc"),
+        standing=standing(card.get("mcc")),
+        measured_on=card.get("measured_on") or "the set it was evaluated on",
+        scope=(card.get("scope") or DEFAULT_SCOPE).strip(),
+    )
 
 MAX_SEQUENCES = 64
 MAX_RESIDUES = 64 * 512

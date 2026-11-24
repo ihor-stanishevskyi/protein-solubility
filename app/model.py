@@ -46,7 +46,8 @@ UNKNOWN_CARD = {
     "what_it_is": "No card shipped beside this model file, so nothing is known "
                   "about how it was trained or how well it does.",
     "answers_mean_nothing": True,
-    "mcc": None, "auroc": None, "accuracy": None, "trained_on": None, "measured": None,
+    "mcc": None, "auroc": None, "accuracy": None, "measured": None,
+    "trained_on": None, "measured_on": None, "scope": None,
 }
 
 

@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Two roles for protein-solubility: the one GitHub Actions assumes to deploy,
-  and the one the function runs as. No access keys anywhere - CI authenticates
-  with a short-lived OpenID Connect token.
+  Two roles for protein-solubility - the one GitHub Actions assumes to deploy
+  and the one the function runs as - plus the bucket the trained weights live
+  in. No access keys anywhere: CI authenticates with a short-lived OpenID
+  Connect token.
 
 Parameters:
   GitHubOwner:
@@ -37,6 +38,34 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # The trained weights are ~140 MB: too big for the repository and too
+  # valuable to hold only in a Colab session that disappears. The name is
+  # derived, not random, so CI can address the bucket without looking it up.
+  WeightsBucket:
+    Type: AWS::S3::Bucket
+    # Deleting the stack must not take the weights with it.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${RepoName}-weights-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          # Versioning is here so a bad upload can be undone, not so every
+          # model ever trained is kept forever.
+          - Id: forget-superseded-weights
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 90
 
   DeployRole:
     Type: AWS::IAM::Role
@@ -106,6 +135,20 @@ Resources:
                   - lambda:AddPermission
                 Resource: !Sub "arn:aws:lambda:*:${AWS::AccountId}:function:${FunctionName}"
 
+              - Sid: ReadTheWeightsAtBuildTime
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${RepoName}-weights-${AWS::AccountId}/*"
+
+              - Sid: TellMissingWeightsFromForbiddenOnes
+                Effect: Allow
+                # Without ListBucket, S3 answers a request for a key that is
+                # not there with 403, not 404. The build would then report a
+                # permissions problem when the real state is "nothing uploaded
+                # yet" - a diagnosis pointing at the wrong thing.
+                Action: s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::${RepoName}-weights-${AWS::AccountId}"
+
               - Sid: HandTheFunctionItsOwnRole
                 Effect: Allow
                 Action: iam:PassRole
@@ -128,3 +171,6 @@ Outputs:
   ExecutionRoleArn:
     Description: The role the function runs as
     Value: !GetAtt ExecutionRole.Arn
+  WeightsBucketName:
+    Description: Upload model.onnx, vocab.json and metrics.json here
+    Value: !Ref WeightsBucket

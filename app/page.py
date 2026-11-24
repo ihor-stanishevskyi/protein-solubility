@@ -104,7 +104,7 @@ function claimFor(m) {
   if (m.mcc != null) bits.push("MCC " + m.mcc);
   if (m.auroc != null) bits.push("AUROC " + m.auroc);
   if (!bits.length) return "No measured performance shipped with these weights.";
-  return bits.join(", ") + (m.trained_on ? " on " + m.trained_on : "") + ".";
+  return bits.join(", ") + (m.measured_on ? " on " + m.measured_on : "") + ".";
 }
 
 (async () => {
