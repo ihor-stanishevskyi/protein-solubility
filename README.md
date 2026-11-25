@@ -6,29 +6,27 @@ the runtime.
 
 **[Try it](https://lcfxj6aqrznnjwfe7agp5j3pam0yhtva.lambda-url.us-east-1.on.aws/)**
 
-> **What is deployed right now is a stand-in, not the trained model** — a 1.7 KB
-> graph with the real one's input and output signature and random weights. The
-> service says so itself, in red, on every page and in every answer. It is live
-> ahead of the weights so that the deployment, the permissions and the page
-> could be tested before there was a model to risk.
->
-> Do not take the numbers in the next section as the numbers the link returns.
-> `/health` always reports which weights are loaded and what they scored; that
-> endpoint, not this file, is the truth about the running service.
+## What the number is worth
 
-## What the number will be worth
+The same recipe was trained three times, deliberately unchanged, so that the
+spread is visible rather than hidden behind one figure:
 
-From the training run of 2026-11-07, on an RTX 4090. These are the weights
-being deployed, not a target:
+| Run | GPU | MCC | AUROC | Accuracy |
+|---|---|---|---|---|
+| 2026-11-07 | RTX 4090 | 0.4754 | 0.8344 | 73.6% |
+| **2026-11-24** (deployed) | Tesla T4 | **0.4594** | **0.8319** | **72.0%** |
+| 2026-11-25 | Tesla T4 | 0.4336 | 0.8352 | 70.1% |
 
-| | |
-|---|---|
-| MCC | **0.475** |
-| AUROC | 0.834 |
-| Accuracy | 73.6% |
-| Measured on | the solubility test split, 2001 proteins |
+**AUROC barely moves — 0.832 to 0.835 — while MCC swings by 0.04.** MCC is
+computed at a fixed 0.5 threshold, so it picks up every small shift in where
+the probabilities land; AUROC does not depend on a threshold at all. So the
+honest reading of the deployed number is not "MCC 0.4594" but "MCC somewhere
+around 0.43–0.48, and a ranking quality that is stable".
 
-0.475 is clearly better than chance and clearly not a decision. It is the
+The service reports the measured figures of the weights it is actually
+running, which is the middle row. `/health` always states them.
+
+0.46 is clearly better than chance and clearly not a decision. It is the
 difference between *"rank these 200 constructs and try the top 20 first"* and
 *"do not bother expressing this one"* — only the first is supported.
 
@@ -100,8 +98,8 @@ The repository ships a stand-in model (`models/stand-in.onnx`, 1.7 KB) with the
 real one's input and output signature. Its answers are meaningless on purpose:
 tests that needed the trained weights would be testing the model, not the
 service. The image bakes that stand-in in by default; the deploy workflow
-replaces it with the trained weights when they are present in the project's S3
-bucket, and says in its job summary which of the two it shipped.
+replaces it with the trained weights from the project's S3 bucket, and says in
+its job summary which of the two it shipped.
 
 Nothing the service claims about a model is written in the code. The score, the
 set it was measured on, the alphabet and the wording of the caveat all come from
