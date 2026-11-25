@@ -21,7 +21,7 @@ import sys
 REQUIRED = ("mcc", "auroc", "accuracy")
 
 
-def build(metrics: dict, measured: str) -> dict:
+def build(metrics: dict, built: str) -> dict:
     missing = [k for k in REQUIRED if metrics.get(k) is None]
     base_model = metrics.get("model") or "an unnamed checkpoint"
     dataset = metrics.get("dataset") or "proteinea/solubility"
@@ -42,7 +42,10 @@ def build(metrics: dict, measured: str) -> dict:
         "mcc": metrics.get("mcc"),
         "auroc": metrics.get("auroc"),
         "accuracy": metrics.get("accuracy"),
-        "measured": measured,
+        # When the run did not write down its own date, the card says so.
+        # Filling in today's date would claim a measurement was made today.
+        "measured": metrics.get("measured_at"),
+        "card_built": built,
         "trained_on": f"{dataset} training split"
                       + (f", {n_train} sequences" if n_train else ""),
         "measured_on": f"the {dataset} test split"
@@ -86,11 +89,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("metrics", type=pathlib.Path)
     ap.add_argument("out", type=pathlib.Path)
-    ap.add_argument("--measured", required=True, help="date the run was made, YYYY-MM-DD")
+    ap.add_argument("--measured", required=True, dest="built",
+                    help="today's date; used only as the card's build date")
     a = ap.parse_args()
 
     metrics = json.loads(a.metrics.read_text(encoding="utf-8"))
-    card = build(metrics, a.measured)
+    card = build(metrics, a.built)
     a.out.write_text(json.dumps(card, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     if card["answers_mean_nothing"]:

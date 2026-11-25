@@ -125,7 +125,9 @@ function claimFor(m) {
         + h.vocabulary_check + "), so treat the numbers with extra suspicion.";
     }
     $("#claim").textContent = claimFor(m);
-    $("#perf").textContent = m.name ? "Loaded: " + m.name + (m.measured ? " · " + m.measured : "") : "";
+    const when = m.measured ? " · measured " + m.measured
+               : (m.card_built ? " · measurement date not recorded, card built " + m.card_built : "");
+    $("#perf").textContent = m.name ? "Loaded: " + m.name + when : "";
     if (m.answers_mean_nothing) {
       $("#alarm").className = "alarm";
       $("#alarm").textContent = "These numbers mean nothing. " + (m.what_it_is || "");

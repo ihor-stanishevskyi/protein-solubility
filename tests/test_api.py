@@ -352,3 +352,21 @@ def test_the_readme_links_somewhere_real():
     try_it = re.search(r"\*\*\[Try it\]\(([^)]*)\)\*\*", readme)
     assert try_it, "the README no longer has a Try it link"
     assert try_it.group(1).startswith("https://"), try_it.group(1)
+
+
+def test_the_card_never_invents_a_measurement_date(tmp_path):
+    """The footer read 'Loaded: ... 2026-11-25' for numbers measured on the
+    24th, because the card took the day it was assembled for the day the run
+    was made. A date is a claim like any other."""
+    undated = make_card(tmp_path, MEASURED_RUN)
+    assert undated["measured"] is None, "a date appeared that no run recorded"
+    assert undated["card_built"] == "2026-11-24"
+
+    dated = make_card(tmp_path, MEASURED_RUN | {"measured_at": "2026-11-07"})
+    assert dated["measured"] == "2026-11-07"
+
+
+def test_the_page_says_which_date_it_is_showing():
+    _, script = _page_parts()
+    assert "measurement date not recorded" in script, (
+        "the footer shows a bare date, so a build date reads as a measurement date")

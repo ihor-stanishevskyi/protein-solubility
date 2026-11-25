@@ -200,6 +200,9 @@ def main() -> int:
     (out / "metrics.json").write_text(json.dumps({
         "model": MODEL, "epochs": EPOCHS, "batch": BATCH, "lr": LR, "max_len": MAX_LEN,
         "trained_on": f"RunPod {card}, fp16 AMP",
+        # The day the measurement was made. Without it the card cannot say
+        # when, and must not borrow the day it was assembled.
+        "measured_at": time.strftime("%Y-%m-%d", time.gmtime()),
         "n_train": len(tr_s), "n_test": len(te_s),
         "mcc": round(mcc, 4), "auroc": round(auroc, 4), "accuracy": round(acc, 4),
         "reference_2026_11_07": REFERENCE,
